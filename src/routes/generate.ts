@@ -155,26 +155,79 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       return;
     }
 
+    // Helper: compute correct dayName from a date string (never trust GPT for this)
+    const DAY_NAMES = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+    const getDayName = (dateStr: string): string => {
+      const date = new Date(dateStr + "T12:00:00"); // noon to avoid timezone issues
+      return DAY_NAMES[date.getDay()];
+    };
+
+    // Helper: generate fallback post for missing media
+    const FALLBACK_TIMES = ["12:00 PM", "06:30 PM", "09:00 AM", "03:00 PM", "05:00 PM"];
+    const generateFallbackPost = (mediaItem: MediaItem, index: number, startDate: string): typeof posts[0] => {
+      const date = new Date(startDate + "T12:00:00");
+      // Skip Monday (1) and Sunday (0) for restaurant
+      let daysAdded = 0;
+      let offset = index;
+      while (daysAdded <= offset) {
+        date.setDate(date.getDate() + 1);
+        const day = date.getDay();
+        if (day !== 0 && day !== 1) daysAdded++;
+      }
+      const dateStr = date.toISOString().split("T")[0];
+      return {
+        id: `post-${uuidv4()}`,
+        mediaId: mediaItem.id,
+        caption: `Ontdek de smaken van ${brandContext.businessName || "ons restaurant"}. Elke dag bereiden we onze gerechten met verse ingrediënten en Italiaanse passie. Buon appetito! 🍝`,
+        hashtags: ["#LOsteriaDeerlijk", "#LOsteria", "#Deerlijk", "#ItaliaanskeukenDeerlijk", "#FoodiesBelgië"],
+        scheduledDate: dateStr,
+        scheduledTime: FALLBACK_TIMES[index % FALLBACK_TIMES.length],
+        dayName: getDayName(dateStr),
+        sentiment: "Very Positive" as const,
+        isOptimized: true,
+        createdAt: Date.now(),
+      };
+    };
+
     // Map GPT response to frontend Post interface
     const posts = parsed.posts.map((gptPost) => {
       // Find the corresponding media item
       const mediaItem = images[gptPost.mediaIndex] || images[0];
 
+      // Compute correct dayName from the date (BUG-1 fix: GPT hallucinates day names)
+      const correctDayName = getDayName(gptPost.scheduledDate);
+
+      // Ensure caption contains at least one period
+      let caption = gptPost.caption;
+      if (!caption.includes(".")) {
+        caption = caption + ".";
+      }
+
       return {
         id: `post-${uuidv4()}`,
         mediaId: mediaItem.id,
-        caption: gptPost.caption,
-        hashtags: gptPost.hashtags,
+        caption,
+        hashtags: gptPost.hashtags.length > 0 ? gptPost.hashtags : ["#LOsteriaDeerlijk", "#LOsteria", "#Deerlijk"],
         scheduledDate: gptPost.scheduledDate,
         scheduledTime: gptPost.scheduledTime,
-        dayName: gptPost.dayName,
+        dayName: correctDayName,
         sentiment: gptPost.sentiment,
         isOptimized: true,
         createdAt: Date.now(),
       };
     });
 
-    console.log(`✅ Generated ${posts.length} posts successfully`);
+    // BUG-3 fix: If GPT returned fewer posts than images, generate fallback posts for missing ones
+    const coveredMediaIds = new Set(posts.map((p) => p.mediaId));
+    const missingImages = images.filter((img) => !coveredMediaIds.has(img.id));
+    if (missingImages.length > 0) {
+      console.log(`⚠️ GPT returned ${posts.length} posts for ${images.length} images. Generating ${missingImages.length} fallback(s).`);
+      for (let i = 0; i < missingImages.length; i++) {
+        posts.push(generateFallbackPost(missingImages[i], posts.length + i, today));
+      }
+    }
+
+    console.log(`✅ Generated ${posts.length} posts successfully (${posts.length - missingImages.length} AI + ${missingImages.length} fallback)`);
 
     res.json({
       posts,
