@@ -6,6 +6,22 @@ import { brandRouter } from "./routes/brand";
 
 dotenv.config();
 
+// Prevent EPIPE / socket errors from crashing the process.
+// These happen when OpenAI drops the connection mid-upload (large payloads).
+process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ERR_STREAM_WRITE_AFTER_END") {
+    console.warn(`⚠️ Socket error caught (${err.code}): ${err.message} — server stays alive`);
+    return; // swallow it, don't crash
+  }
+  // For anything else, log and keep running (don't exit)
+  console.error("❌ Uncaught exception:", err);
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  console.error("❌ Unhandled promise rejection:", reason);
+  // Don't crash — log and continue
+});
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";

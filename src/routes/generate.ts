@@ -238,6 +238,8 @@ generateRouter.post("/", async (req: Request, res: Response) => {
 
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
+      maxRetries: 2, // Retry on transient errors (EPIPE, ECONNRESET)
+      timeout: 60000, // 60s per request to OpenAI
     });
 
     // Build brand context
@@ -262,29 +264,54 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       },
     ];
 
-    // Add each image — validate format and log sizes
+    // Add each image — validate format, resize if too large, log sizes
     for (let i = 0; i < images.length; i++) {
       const img = images[i];
-      const imageUrl = normalizeImageDataUrl(img.base64, img.mimeType || "image/jpeg");
-      const sizeBytes = base64ByteSize(imageUrl);
-      const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+      let imageUrl = normalizeImageDataUrl(img.base64, img.mimeType || "image/jpeg");
+      let sizeBytes = base64ByteSize(imageUrl);
+      let sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+
+      // Server-side resize: if image > 4MB, use ffmpeg to downscale
+      // This prevents EPIPE errors from sending huge payloads to OpenAI
+      if (sizeBytes > 4 * 1024 * 1024) {
+        console.log(`📐 Image ${i + 1} is ${sizeMB} MB — resizing to max 1920px...`);
+        try {
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "postagen-resize-"));
+          const inputPath = path.join(tmpDir, "input.jpg");
+          const outputPath = path.join(tmpDir, "output.jpg");
+
+          const rawBase64 = imageUrl.includes(",") ? imageUrl.split(",")[1] : imageUrl;
+          fs.writeFileSync(inputPath, Buffer.from(rawBase64, "base64"));
+
+          execSync(
+            `ffmpeg -y -i "${inputPath}" -vf "scale='min(1920,iw)':-2" -q:v 4 "${outputPath}"`,
+            { timeout: 15000, stdio: "pipe" }
+          );
+
+          if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+            const resizedBase64 = fs.readFileSync(outputPath).toString("base64");
+            imageUrl = `data:image/jpeg;base64,${resizedBase64}`;
+            sizeBytes = base64ByteSize(imageUrl);
+            const newSizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+            console.log(`📐 Resized: ${sizeMB} MB → ${newSizeMB} MB`);
+            sizeMB = newSizeMB;
+          }
+
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        } catch (resizeErr) {
+          console.warn(`⚠️ Could not resize image ${i + 1}, using original (${sizeMB} MB)`);
+        }
+      }
 
       console.log(
         `📷 Image ${i + 1}/${images.length}: ${sizeMB} MB | format: ${imageUrl.substring(0, 100)}...`
       );
 
-      // Warn for very large images (>15MB)
-      if (sizeBytes > 15 * 1024 * 1024) {
-        console.warn(
-          `⚠️ Image ${i + 1} is very large (${sizeMB} MB) — this may cause issues.`
-        );
-      }
-
       userContent.push({
         type: "image_url",
         image_url: {
           url: imageUrl,
-          detail: "auto", // Let GPT choose the right detail level
+          detail: images.length > 5 ? "low" : "auto", // Use low detail for large batches to reduce tokens
         },
       });
     }
