@@ -19,9 +19,9 @@ app.use(
   })
 );
 
-// Increase payload limit for base64 images (50MB)
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+// Increase payload limit for base64 images (150MB)
+app.use(express.json({ limit: "150mb" }));
+app.use(express.urlencoded({ extended: true, limit: "150mb" }));
 
 // Routes
 app.use("/api/generate", generateRouter);

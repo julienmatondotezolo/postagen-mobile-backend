@@ -5,7 +5,8 @@ import { parse as parseHTML } from "node-html-parser";
 export const brandRouter = Router();
 
 interface AnalyzeBrandRequest {
-  url: string;
+  url?: string;
+  description?: string;
 }
 
 interface AnalyzeBrandResponse {
@@ -72,15 +73,18 @@ async function scrapeWebsite(url: string): Promise<string> {
   return text;
 }
 
-// POST /api/brand/analyze
+// POST /api/brand/analyze — MUST be defined before any /:slug routes
 brandRouter.post("/analyze", async (req: Request, res: Response) => {
   try {
-    const { url } = req.body as AnalyzeBrandRequest;
+    const { url, description } = req.body as AnalyzeBrandRequest;
 
-    if (!url || url.trim().length === 0) {
+    const hasUrl = url && url.trim().length > 0;
+    const hasDescription = description && description.trim().length > 0;
+
+    if (!hasUrl && !hasDescription) {
       res.status(400).json({
-        error: "URL is required",
-        message: "Please provide a website URL to analyze.",
+        error: "URL or description required",
+        message: "Please provide a website URL, a description, or both to analyze your brand.",
       });
       return;
     }
@@ -94,30 +98,50 @@ brandRouter.post("/analyze", async (req: Request, res: Response) => {
       return;
     }
 
-    // Step 1: Scrape the website
-    let websiteText: string;
-    try {
-      websiteText = await scrapeWebsite(url);
-    } catch (scrapeError) {
-      console.error("❌ Scrape error:", scrapeError);
-      res.status(422).json({
-        error: "Could not fetch website",
-        message:
-          "We couldn't access the website. Please check the URL and try again, or describe your brand manually.",
-      });
-      return;
+    // Step 1: Scrape the website (if URL provided)
+    let websiteText = "";
+    if (hasUrl) {
+      try {
+        websiteText = await scrapeWebsite(url!);
+      } catch (scrapeError) {
+        console.error("❌ Scrape error:", scrapeError);
+        // If we have a description, we can continue without the scrape
+        if (!hasDescription) {
+          res.status(422).json({
+            error: "Could not fetch website",
+            message:
+              "We couldn't access the website. Please check the URL and try again, or describe your brand manually.",
+          });
+          return;
+        }
+        console.log("⚠️ Scrape failed but continuing with description only");
+      }
+
+      if (websiteText.length < 50 && !hasDescription) {
+        res.status(422).json({
+          error: "Insufficient content",
+          message:
+            "The website didn't contain enough text to analyze. Please describe your brand manually.",
+        });
+        return;
+      }
     }
 
-    if (websiteText.length < 50) {
-      res.status(422).json({
-        error: "Insufficient content",
-        message:
-          "The website didn't contain enough text to analyze. Please describe your brand manually.",
-      });
-      return;
+    // Step 2: Build the GPT prompt based on available inputs
+    let userMessage: string;
+
+    if (hasUrl && websiteText.length > 0 && hasDescription) {
+      // Case C: Both URL and description
+      userMessage = `Analyze this website content from ${url}:\n\n${websiteText}\n\nAdditionally, the business owner provided this description of their brand:\n"${description!.trim()}".\n\nPlease merge both sources into one comprehensive brand profile.`;
+    } else if (hasUrl && websiteText.length > 0) {
+      // Case A: URL only
+      userMessage = `Analyze this website content from ${url}:\n\n${websiteText}`;
+    } else {
+      // Case B: Description only (or URL failed + description fallback)
+      userMessage = `Create a brand profile based on this description provided by the business owner:\n\n"${description!.trim()}"`;
     }
 
-    // Step 2: Send to GPT-4o for analysis
+    // Step 3: Send to GPT-4o for analysis
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
@@ -127,25 +151,25 @@ brandRouter.post("/analyze", async (req: Request, res: Response) => {
       messages: [
         {
           role: "system",
-          content: `You are a brand analyst. Analyze the website content below and extract key business information.
+          content: `You are a brand analyst. Analyze the provided information and extract key business information.
 Return ONLY valid JSON in this exact format (no markdown, no code blocks):
 {
   "businessName": "The official business name",
-  "description": "A comprehensive 2-3 sentence description of the business, its values, and what makes it unique. Write in the language of the website.",
+  "description": "A comprehensive 2-3 sentence description of the business, its values, and what makes it unique. Write in the language of the provided content (or in the language the description was written in).",
   "tone": "Describe the brand's communication tone in 3-5 comma-separated adjectives",
   "menuHighlights": ["Key product 1", "Key product 2", "Key service 1"]
 }
 
 Rules:
-- businessName: the actual name of the business (not the domain)
-- description: write in the same language as the website content. Be specific, not generic.
+- businessName: the actual name of the business (not the domain). If only a description is provided, infer the best business name possible, or use the most prominent term.
+- description: write in the same language as the provided content. Be specific, not generic.
 - tone: e.g. "warm, professional, playful, luxurious"
 - menuHighlights: list 5-10 key products, services, or offerings. If it's a restaurant, list menu items. If it's a shop, list product categories. Leave empty array if unclear.
 - Return ONLY the JSON object, nothing else.`,
         },
         {
           role: "user",
-          content: `Analyze this website content from ${url}:\n\n${websiteText}`,
+          content: userMessage,
         },
       ],
       max_tokens: 1024,
@@ -156,7 +180,7 @@ Rules:
     if (!rawResponse) {
       res.status(500).json({
         error: "Empty AI response",
-        message: "The AI could not analyze the website. Please try again or describe your brand manually.",
+        message: "The AI could not analyze the brand. Please try again or describe your brand manually.",
       });
       return;
     }
