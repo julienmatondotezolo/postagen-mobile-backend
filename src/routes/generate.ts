@@ -37,6 +37,43 @@ interface GPTResponse {
   planDescription: string;
 }
 
+/**
+ * Validate and normalise a base64 data URL.
+ * Ensures the format is `data:<mime>;base64,<payload>`.
+ */
+function normalizeImageDataUrl(raw: string, fallbackMime: string): string {
+  if (raw.startsWith("data:")) {
+    return raw;
+  }
+  // Raw base64 without data-URL prefix
+  return `data:${fallbackMime || "image/jpeg"};base64,${raw}`;
+}
+
+/**
+ * Return the byte-size of a base64 data URL payload.
+ */
+function base64ByteSize(dataUrl: string): number {
+  const base64 = dataUrl.split(",")[1] || dataUrl;
+  return Math.ceil((base64.length * 3) / 4);
+}
+
+/**
+ * Check if a GPT response looks like a refusal rather than valid JSON.
+ */
+function isRefusal(text: string): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("i'm sorry") ||
+    lower.includes("i can't assist") ||
+    lower.includes("i cannot assist") ||
+    lower.includes("i'm unable to") ||
+    lower.includes("i cannot help") ||
+    lower.includes("i can't help") ||
+    lower.includes("as an ai") ||
+    (lower.startsWith("i") && !lower.startsWith("{"))
+  );
+}
+
 // POST /api/generate
 generateRouter.post("/", async (req: Request, res: Response) => {
   try {
@@ -76,10 +113,10 @@ generateRouter.post("/", async (req: Request, res: Response) => {
 
     // Build brand context
     const brandContext: BrandContext = {
-      businessName: brandIdentity?.businessName || "L'Osteria Deerlijk",
+      businessName: brandIdentity?.businessName || undefined,
       websiteUrl: brandIdentity?.websiteUrl,
       description: brandIdentity?.description,
-      tone: "warm, uitnodigend, familiegericht, mix van Nederlands en Italiaans",
+      tone: undefined, // Let the prompt use its own defaults
       languages: ["nl", "fr", "it"],
     };
 
@@ -88,71 +125,98 @@ generateRouter.post("/", async (req: Request, res: Response) => {
     const systemPrompt = buildGeneratePrompt(brandContext, images.length, today);
 
     // Build messages with images for GPT-4o Vision
+    const businessLabel = brandContext.businessName || "het bedrijf";
     const userContent: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
       {
         type: "text",
-        text: `Hier zijn ${images.length} foto('s) van ${brandContext.businessName}. Analyseer elke foto en genereer een social media post per foto. Antwoord ALLEEN met geldige JSON.`,
+        text: `Hier zijn ${images.length} foto('s) van ${businessLabel}. Analyseer elke foto en genereer een social media post per foto. Antwoord ALLEEN met geldige JSON.`,
       },
     ];
 
-    // Add each image
-    for (const img of images) {
-      // Ensure the base64 string is a proper data URL
-      let imageUrl = img.base64;
-      if (!imageUrl.startsWith("data:")) {
-        imageUrl = `data:${img.mimeType || "image/jpeg"};base64,${imageUrl}`;
+    // Add each image — validate format and log sizes
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const imageUrl = normalizeImageDataUrl(img.base64, img.mimeType || "image/jpeg");
+      const sizeBytes = base64ByteSize(imageUrl);
+      const sizeMB = (sizeBytes / (1024 * 1024)).toFixed(2);
+
+      console.log(
+        `📷 Image ${i + 1}/${images.length}: ${sizeMB} MB | format: ${imageUrl.substring(0, 100)}...`
+      );
+
+      // Warn for very large images (>15MB)
+      if (sizeBytes > 15 * 1024 * 1024) {
+        console.warn(
+          `⚠️ Image ${i + 1} is very large (${sizeMB} MB) — this may cause issues.`
+        );
       }
 
       userContent.push({
         type: "image_url",
         image_url: {
           url: imageUrl,
-          detail: "low", // Use low detail to save tokens while still getting good analysis
+          detail: "auto", // Let GPT choose the right detail level
         },
       });
     }
 
     console.log(`📸 Sending ${images.length} image(s) to GPT-4o for analysis...`);
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 4096,
-      temperature: 0.8,
-    });
+    /**
+     * Attempt a GPT call with the given detail level.
+     * Returns the raw content string or null.
+     */
+    const attemptGPTCall = async (
+      detail: "auto" | "high" | "low"
+    ): Promise<string | null> => {
+      // Rebuild image content with specific detail level
+      const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
+        userContent[0], // text part
+      ];
+      for (const img of images) {
+        const imageUrl = normalizeImageDataUrl(img.base64, img.mimeType || "image/jpeg");
+        content.push({
+          type: "image_url",
+          image_url: { url: imageUrl, detail },
+        });
+      }
 
-    const rawResponse = completion.choices[0]?.message?.content;
-    if (!rawResponse) {
-      res.status(500).json({
-        error: "Empty response from OpenAI",
-        message: "The AI did not return any content. Please try again.",
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content },
+        ],
+        max_tokens: 4096,
+        temperature: 0.8,
       });
-      return;
+
+      const raw = completion.choices[0]?.message?.content;
+      if (!raw) return null;
+
+      console.log(`🤖 GPT response (detail=${detail}):`, raw.substring(0, 300));
+
+      if (isRefusal(raw)) {
+        console.warn(`⚠️ GPT refused with detail="${detail}": ${raw.substring(0, 200)}`);
+        return null;
+      }
+
+      return raw;
+    };
+
+    // --- Attempt 1: detail=auto ---
+    let rawResponse = await attemptGPTCall("auto");
+
+    // --- Attempt 2: retry with detail=high if first attempt was refused ---
+    if (!rawResponse) {
+      console.log("🔄 Retrying with detail=high...");
+      rawResponse = await attemptGPTCall("high");
     }
 
-    console.log("🤖 Raw GPT response:", rawResponse);
-
-    // Parse JSON from response (handle potential markdown code blocks)
-    let parsed: GPTResponse;
-    try {
-      // Strip markdown code fences if present
-      let jsonStr = rawResponse.trim();
-      if (jsonStr.startsWith("```")) {
-        jsonStr = jsonStr.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
-      }
-      parsed = JSON.parse(jsonStr);
-    } catch (parseError) {
-      console.error("❌ Failed to parse GPT response:", parseError);
-      console.error("Raw response was:", rawResponse);
-      res.status(500).json({
-        error: "Failed to parse AI response",
-        message: "The AI returned an invalid format. Please try again.",
-        raw: rawResponse,
-      });
-      return;
+    // --- Attempt 3: retry with detail=low ---
+    if (!rawResponse) {
+      console.log("🔄 Retrying with detail=low...");
+      rawResponse = await attemptGPTCall("low");
     }
 
     // Helper: compute correct dayName from a date string (never trust GPT for this)
@@ -162,11 +226,15 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       return DAY_NAMES[date.getDay()];
     };
 
-    // Helper: generate fallback post for missing media
+    // Helper: generate fallback post for a media item
     const FALLBACK_TIMES = ["12:00 PM", "06:30 PM", "09:00 AM", "03:00 PM", "05:00 PM"];
-    const generateFallbackPost = (mediaItem: MediaItem, index: number, startDate: string): typeof posts[0] => {
+    const generateFallbackPost = (
+      mediaItem: MediaItem,
+      index: number,
+      startDate: string
+    ) => {
       const date = new Date(startDate + "T12:00:00");
-      // Skip Monday (1) and Sunday (0) for restaurant
+      // Skip Monday (1) and Sunday (0)
       let daysAdded = 0;
       let offset = index;
       while (daysAdded <= offset) {
@@ -175,11 +243,12 @@ generateRouter.post("/", async (req: Request, res: Response) => {
         if (day !== 0 && day !== 1) daysAdded++;
       }
       const dateStr = date.toISOString().split("T")[0];
+      const label = brandContext.businessName || "ons bedrijf";
       return {
         id: `post-${uuidv4()}`,
         mediaId: mediaItem.id,
-        caption: `Ontdek de smaken van ${brandContext.businessName || "ons restaurant"}. Elke dag bereiden we onze gerechten met verse ingrediënten en Italiaanse passie. Buon appetito! 🍝`,
-        hashtags: ["#LOsteriaDeerlijk", "#LOsteria", "#Deerlijk", "#ItaliaanskeukenDeerlijk", "#FoodiesBelgië"],
+        caption: `Ontdek wat ${label} te bieden heeft. Bekijk onze nieuwste content en laat je inspireren! ✨`,
+        hashtags: ["#ContentPlan", "#SocialMedia", "#AIGenerated"],
         scheduledDate: dateStr,
         scheduledTime: FALLBACK_TIMES[index % FALLBACK_TIMES.length],
         dayName: getDayName(dateStr),
@@ -189,15 +258,54 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       };
     };
 
+    // --- If GPT still refused after all retries, generate fallback posts ---
+    if (!rawResponse) {
+      console.warn("❌ GPT refused all attempts. Generating fallback posts for all images.");
+      const fallbackPosts = images.map((img, i) =>
+        generateFallbackPost(img, i, today)
+      );
+
+      res.json({
+        posts: fallbackPosts,
+        planName: `Content Plan - ${new Date().toLocaleDateString("nl-BE")}`,
+        planDescription: "AI-gegenereerd contentplan (fallback — beelden konden niet worden geanalyseerd)",
+      });
+      return;
+    }
+
+    console.log("🤖 Raw GPT response:", rawResponse);
+
+    // Parse JSON from response (handle potential markdown code blocks)
+    let parsed: GPTResponse;
+    try {
+      let jsonStr = rawResponse.trim();
+      if (jsonStr.startsWith("```")) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+      }
+      parsed = JSON.parse(jsonStr);
+    } catch (parseError) {
+      console.error("❌ Failed to parse GPT response:", parseError);
+      console.error("Raw response was:", rawResponse);
+
+      // Generate fallback posts instead of returning 500
+      console.warn("⚠️ Generating fallback posts due to parse failure.");
+      const fallbackPosts = images.map((img, i) =>
+        generateFallbackPost(img, i, today)
+      );
+
+      res.json({
+        posts: fallbackPosts,
+        planName: `Content Plan - ${new Date().toLocaleDateString("nl-BE")}`,
+        planDescription: "AI-gegenereerd contentplan (fallback — antwoord kon niet worden verwerkt)",
+      });
+      return;
+    }
+
     // Map GPT response to frontend Post interface
     const posts = parsed.posts.map((gptPost) => {
-      // Find the corresponding media item
       const mediaItem = images[gptPost.mediaIndex] || images[0];
-
-      // Compute correct dayName from the date (BUG-1 fix: GPT hallucinates day names)
       const correctDayName = getDayName(gptPost.scheduledDate);
 
-      // Ensure caption contains at least one period
       let caption = gptPost.caption;
       if (!caption.includes(".")) {
         caption = caption + ".";
@@ -207,7 +315,10 @@ generateRouter.post("/", async (req: Request, res: Response) => {
         id: `post-${uuidv4()}`,
         mediaId: mediaItem.id,
         caption,
-        hashtags: gptPost.hashtags.length > 0 ? gptPost.hashtags : ["#LOsteriaDeerlijk", "#LOsteria", "#Deerlijk"],
+        hashtags:
+          gptPost.hashtags.length > 0
+            ? gptPost.hashtags
+            : ["#ContentPlan", "#SocialMedia"],
         scheduledDate: gptPost.scheduledDate,
         scheduledTime: gptPost.scheduledTime,
         dayName: correctDayName,
@@ -217,17 +328,21 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       };
     });
 
-    // BUG-3 fix: If GPT returned fewer posts than images, generate fallback posts for missing ones
+    // If GPT returned fewer posts than images, generate fallback posts for missing ones
     const coveredMediaIds = new Set(posts.map((p) => p.mediaId));
     const missingImages = images.filter((img) => !coveredMediaIds.has(img.id));
     if (missingImages.length > 0) {
-      console.log(`⚠️ GPT returned ${posts.length} posts for ${images.length} images. Generating ${missingImages.length} fallback(s).`);
+      console.log(
+        `⚠️ GPT returned ${posts.length} posts for ${images.length} images. Generating ${missingImages.length} fallback(s).`
+      );
       for (let i = 0; i < missingImages.length; i++) {
         posts.push(generateFallbackPost(missingImages[i], posts.length + i, today));
       }
     }
 
-    console.log(`✅ Generated ${posts.length} posts successfully (${posts.length - missingImages.length} AI + ${missingImages.length} fallback)`);
+    console.log(
+      `✅ Generated ${posts.length} posts successfully (${posts.length - missingImages.length} AI + ${missingImages.length} fallback)`
+    );
 
     res.json({
       posts,
