@@ -2,6 +2,10 @@ import { Router, Request, Response } from "express";
 import OpenAI from "openai";
 import { v4 as uuidv4 } from "uuid";
 import { buildGeneratePrompt, BrandContext } from "../prompts/generate";
+import { execSync } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 export const generateRouter = Router();
 
@@ -58,6 +62,99 @@ function base64ByteSize(dataUrl: string): number {
 }
 
 /**
+ * Extract key frames from a video using ffmpeg.
+ * Returns an array of base64 data URLs (JPEG) for each extracted frame.
+ * Strategy: extract up to `maxFrames` evenly spaced frames.
+ * Each frame is resized to max 1024px wide to keep payloads manageable.
+ */
+function extractVideoFrames(
+  videoDataUrl: string,
+  mimeType: string,
+  maxFrames: number = 1
+): string[] {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "postagen-video-"));
+
+  try {
+    // Strip data URL prefix to get raw base64
+    const base64Data = videoDataUrl.includes(",")
+      ? videoDataUrl.split(",")[1]
+      : videoDataUrl;
+
+    // Determine file extension from mime type
+    const ext = mimeType.includes("mp4")
+      ? ".mp4"
+      : mimeType.includes("webm")
+        ? ".webm"
+        : mimeType.includes("mov") || mimeType.includes("quicktime")
+          ? ".mov"
+          : ".mp4";
+
+    const videoPath = path.join(tmpDir, `input${ext}`);
+    fs.writeFileSync(videoPath, Buffer.from(base64Data, "base64"));
+
+    const videoSize = fs.statSync(videoPath).size;
+    console.log(`🎬 Video saved: ${(videoSize / 1024 / 1024).toFixed(2)} MB`);
+
+    // Get video duration using ffprobe
+    let duration = 1;
+    try {
+      const probeOutput = execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+        { timeout: 10000 }
+      ).toString().trim();
+      duration = parseFloat(probeOutput) || 1;
+      console.log(`🎬 Video duration: ${duration.toFixed(1)}s`);
+    } catch (e) {
+      console.warn("⚠️ Could not probe video duration, using single frame");
+    }
+
+    // Calculate timestamps for evenly spaced frames
+    const frameCount = Math.min(maxFrames, Math.max(1, Math.floor(duration / 2)));
+    const timestamps: number[] = [];
+
+    if (frameCount === 1) {
+      // Single frame: take from 25% into the video (avoids black intro frames)
+      timestamps.push(Math.min(duration * 0.25, duration - 0.1));
+    } else {
+      for (let i = 0; i < frameCount; i++) {
+        const t = (duration / (frameCount + 1)) * (i + 1);
+        timestamps.push(t);
+      }
+    }
+
+    const frames: string[] = [];
+
+    for (let i = 0; i < timestamps.length; i++) {
+      const outputPath = path.join(tmpDir, `frame_${i}.jpg`);
+      try {
+        execSync(
+          `ffmpeg -y -ss ${timestamps[i].toFixed(2)} -i "${videoPath}" -vframes 1 -vf "scale='min(1024,iw)':-2" -q:v 3 "${outputPath}"`,
+          { timeout: 15000, stdio: "pipe" }
+        );
+
+        if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          const frameBase64 = fs.readFileSync(outputPath).toString("base64");
+          frames.push(`data:image/jpeg;base64,${frameBase64}`);
+          const frameSizeKB = (fs.statSync(outputPath).size / 1024).toFixed(0);
+          console.log(`🖼️ Frame ${i + 1}/${timestamps.length}: ${frameSizeKB} KB at ${timestamps[i].toFixed(1)}s`);
+        }
+      } catch (e) {
+        console.warn(`⚠️ Failed to extract frame at ${timestamps[i].toFixed(1)}s`);
+      }
+    }
+
+    return frames;
+  } finally {
+    // Cleanup temp directory
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+}
+
+/**
  * Check if a GPT response looks like a refusal rather than valid JSON.
  */
 function isRefusal(text: string): boolean {
@@ -88,14 +185,46 @@ generateRouter.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    // Filter to images only (skip videos for vision API)
-    const images = media.filter((m) => m.type === "image");
+    // Separate images and videos
+    const directImages = media.filter((m) => m.type === "image");
+    const videos = media.filter((m) => m.type === "video");
+
+    // Extract frames from videos and treat them as images
+    const videoFrameItems: MediaItem[] = [];
+    for (const video of videos) {
+      try {
+        console.log(`🎬 Processing video: ${video.id} (${video.mimeType})`);
+        const frames = extractVideoFrames(video.base64, video.mimeType, 1);
+        if (frames.length > 0) {
+          // Use the first frame, keep the original video's ID so mediaId maps back
+          videoFrameItems.push({
+            id: video.id,
+            base64: frames[0],
+            type: "image",
+            mimeType: "image/jpeg",
+          });
+          console.log(`✅ Extracted ${frames.length} frame(s) from video ${video.id}`);
+        } else {
+          console.warn(`⚠️ No frames extracted from video ${video.id}`);
+        }
+      } catch (err) {
+        console.error(`❌ Failed to process video ${video.id}:`, err);
+      }
+    }
+
+    // Combine direct images + video frames
+    const images = [...directImages, ...videoFrameItems];
+
     if (images.length === 0) {
       res.status(400).json({
-        error: "No images provided",
-        message: "At least one image is required. Video analysis is not yet supported.",
+        error: "No processable media",
+        message: "Could not process any of the provided media. Please try with images (JPEG/PNG) or shorter videos.",
       });
       return;
+    }
+
+    if (videos.length > 0) {
+      console.log(`📊 Media summary: ${directImages.length} images + ${videos.length} videos → ${images.length} processable items`);
     }
 
     // Check OpenAI key
