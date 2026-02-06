@@ -19,9 +19,9 @@ app.use(
   })
 );
 
-// Increase payload limit for base64 images (150MB)
-app.use(express.json({ limit: "150mb" }));
-app.use(express.urlencoded({ extended: true, limit: "150mb" }));
+// Increase payload limit for base64 images/videos (500MB to be safe)
+app.use(express.json({ limit: "500mb" }));
+app.use(express.urlencoded({ extended: true, limit: "500mb" }));
 
 // Routes
 app.use("/api/generate", generateRouter);
@@ -35,6 +35,42 @@ app.get("/health", (_req, res) => {
     version: "1.0.0",
   });
 });
+
+// Global error handler — catches PayloadTooLargeError and other Express errors
+app.use(
+  (
+    err: Error & { status?: number; type?: string },
+    _req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction
+  ) => {
+    if (err.type === "entity.too.large" || err.status === 413) {
+      console.warn(`⚠️ Payload too large: ${err.message}`);
+      res.status(413).json({
+        error: "Payload too large",
+        message:
+          "De upload is te groot. Probeer minder of kleinere bestanden te uploaden. Maximum is 500MB per verzoek.",
+      });
+      return;
+    }
+
+    if (err.type === "entity.parse.failed" || err.status === 400) {
+      console.warn(`⚠️ Bad request: ${err.message}`);
+      res.status(400).json({
+        error: "Invalid request",
+        message: "Het verzoek kon niet worden verwerkt. Controleer de data en probeer opnieuw.",
+      });
+      return;
+    }
+
+    // Generic fallback
+    console.error("❌ Unhandled error:", err);
+    res.status(err.status || 500).json({
+      error: "Server error",
+      message: "Er is een onverwachte fout opgetreden. Probeer het opnieuw.",
+    });
+  }
+);
 
 // Start server
 app.listen(PORT, () => {
