@@ -507,11 +507,44 @@ async function handleGeneration(
 // POST /api/generate — multipart/form-data (primary) + JSON fallback
 // ---------------------------------------------------------------------------
 
+// Custom multer error handler middleware
+function multerUpload(req: Request, res: Response, next: Function) {
+  // Use .any() to accept files from ANY field name (avoids LIMIT_UNEXPECTED_FILE)
+  const anyUpload = upload.any();
+  anyUpload(req, res, (err: any) => {
+    if (err) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({
+          error: "File too large",
+          message: "Een of meer bestanden zijn te groot. Maximum 50MB per bestand.",
+        });
+        return;
+      }
+      if (err.code === "LIMIT_UNEXPECTED_FILE") {
+        // Should no longer happen with .any(), but handle gracefully
+        console.warn(`⚠️ Multer unexpected field: ${err.field}. Accepting anyway with .any()`);
+      }
+      if (err.code && err.code.startsWith("LIMIT_")) {
+        res.status(400).json({
+          error: "Upload error",
+          message: `Upload probleem: ${err.message}`,
+        });
+        return;
+      }
+      console.error("❌ Multer error:", err);
+      res.status(500).json({
+        error: "Upload failed",
+        message: "Er ging iets mis bij het uploaden. Probeer het opnieuw.",
+      });
+      return;
+    }
+    next();
+  });
+}
+
 generateRouter.post(
   "/",
-  // Multer runs first but only processes multipart requests.
-  // For JSON requests, multer does nothing and we fall through.
-  upload.array("files", 20),
+  multerUpload,
   async (req: Request, res: Response) => {
     try {
       const contentType = req.headers["content-type"] || "";
@@ -520,6 +553,7 @@ generateRouter.post(
       // PATH A: Multipart/form-data (new — via multer)
       // ------------------------------------------------------------------
       if (contentType.includes("multipart/form-data")) {
+        // .any() puts all files in req.files regardless of field name
         const uploadedFiles = req.files as Express.Multer.File[] | undefined;
 
         if (!uploadedFiles || uploadedFiles.length === 0) {
