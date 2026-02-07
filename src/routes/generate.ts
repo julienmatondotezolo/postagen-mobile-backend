@@ -317,20 +317,23 @@ async function handleGeneration(
 
   /**
    * Attempt a GPT call with the given detail level.
+   * Uses the already-processed userContent (with resized images) and
+   * overrides the detail level for retries.
    */
   const attemptGPTCall = async (
     detail: "auto" | "high" | "low"
   ): Promise<string | null> => {
-    const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
-      userContent[0],
-    ];
-    for (const img of images) {
-      const imageUrl = normalizeImageDataUrl(img.base64, img.mimeType || "image/jpeg");
-      content.push({
-        type: "image_url",
-        image_url: { url: imageUrl, detail },
+    // Clone userContent but override the detail level on all image_url parts
+    const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] =
+      userContent.map((part) => {
+        if (part.type === "image_url") {
+          return {
+            ...part,
+            image_url: { ...part.image_url, detail },
+          };
+        }
+        return part;
       });
-    }
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -355,18 +358,18 @@ async function handleGeneration(
     return raw;
   };
 
-  // --- Attempt 1: detail=auto ---
-  let rawResponse = await attemptGPTCall("auto");
+  // --- Attempt 1: detail based on image count ---
+  let rawResponse = await attemptGPTCall(images.length > 5 ? "low" : "auto");
 
-  // --- Attempt 2: retry with detail=high ---
-  if (!rawResponse) {
-    console.log("🔄 Retrying with detail=high...");
-    rawResponse = await attemptGPTCall("high");
-  }
-
-  // --- Attempt 3: retry with detail=low ---
+  // --- Attempt 2: retry with detail=low (reduces token count) ---
   if (!rawResponse) {
     console.log("🔄 Retrying with detail=low...");
+    rawResponse = await attemptGPTCall("low");
+  }
+
+  // --- Attempt 3: retry with detail=low again (sometimes just needs a second chance) ---
+  if (!rawResponse) {
+    console.log("🔄 Final retry with detail=low...");
     rawResponse = await attemptGPTCall("low");
   }
 
