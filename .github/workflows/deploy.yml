@@ -1,0 +1,28 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - feature/mvp-backend
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          password: ${{ secrets.VPS_PASSWORD }}
+          script: |
+            cd /var/www/postagen-mobile-backend
+            git fetch origin
+            git checkout feature/mvp-backend
+            git pull origin feature/mvp-backend
+            npm install --production
+            pm2 restart postagen-api
+            sleep 3
+            curl -s http://localhost:3001/health || (pm2 logs postagen-api --lines 20 && exit 1)
+            echo "✅ Deploy successful"
