@@ -1,8 +1,11 @@
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 import { generateRouter } from "./routes/generate";
 import { brandRouter } from "./routes/brand";
+import { authRouter } from "./routes/auth";
+import { brandIdentityRouter } from "./routes/brand-identity";
 
 dotenv.config();
 
@@ -29,17 +32,21 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 // Middleware
 app.use(
   cors({
-    origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:3001"],
+    origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:3001", "http://localhost:1010"],
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
   })
 );
+app.use(cookieParser());
 
 // Increase payload limit for base64 images/videos (500MB to be safe)
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ extended: true, limit: "500mb" }));
 
 // Routes
+app.use("/api/auth", authRouter);
+app.use("/api/brand-identity", brandIdentityRouter);
 app.use("/api/generate", generateRouter);
 app.use("/api/brand", brandRouter);
 
