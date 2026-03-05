@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import OpenAI from "openai";
 import { v4 as uuidv4 } from "uuid";
-import { buildGeneratePrompt, BrandContext } from "../prompts/generate";
+import { buildGeneratePrompt, BrandContext, ContentContext } from "../prompts/generate";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
@@ -43,8 +43,10 @@ interface GenerateRequest {
 
 interface GPTPost {
   mediaIndex: number;
+  postType?: "feed" | "story" | "reel";
   caption: string;
   hashtags: string[];
+  platformTip?: string;
   scheduledDate: string;
   scheduledTime: string;
   dayName: string;
@@ -446,7 +448,8 @@ async function handleGeneration(
   brandIdentity: GenerateRequest["brandIdentity"],
   res: Response,
   videoMetadata?: Map<string, { originalId: string; frameCount: number }>,
-  allMediaForFrontend?: MediaItem[]
+  allMediaForFrontend?: MediaItem[],
+  contentContext?: ContentContext
 ): Promise<void> {
   // Check OpenAI key
   if (!process.env.OPENAI_API_KEY) {
@@ -516,7 +519,7 @@ async function handleGeneration(
   videoGroups.forEach((frames, videoId) => mediaIndexMap.push(videoId));
 
   // Step 3: Build system prompt for UNIQUE media count
-  const systemPrompt = buildGeneratePrompt(brandContext, uniqueMediaCount, today);
+  const systemPrompt = buildGeneratePrompt(brandContext, uniqueMediaCount, today, contentContext);
   const businessLabel = brandContext.businessName || "het bedrijf";
 
   let promptText = `Hier zijn media van ${businessLabel}:\n`;
@@ -647,8 +650,10 @@ async function handleGeneration(
     return {
       id: `post-${uuidv4()}`,
       mediaId: mediaItem.id,
+      postType: "feed" as const,
       caption: `Ontdek wat ${label} te bieden heeft. Bekijk onze nieuwste content en laat je inspireren! ✨`,
       hashtags: ["#ContentPlan", "#SocialMedia", "#AIGenerated"],
+      platformTip: "",
       scheduledDate: dateStr,
       scheduledTime: FALLBACK_TIMES[index % FALLBACK_TIMES.length],
       dayName: getDayName(dateStr),
@@ -764,11 +769,13 @@ async function handleGeneration(
     return {
       id: `post-${uuidv4()}`,
       mediaId: actualMediaId, // Uses original video/image ID (not frame ID)
+      postType: gptPost.postType || "feed",
       caption,
       hashtags:
         gptPost.hashtags && gptPost.hashtags.length > 0
           ? gptPost.hashtags
           : ["#ContentPlan", "#SocialMedia"],
+      platformTip: gptPost.platformTip || "",
       scheduledDate: gptPost.scheduledDate,
       scheduledTime: gptPost.scheduledTime,
       dayName: correctDayName,
@@ -897,7 +904,32 @@ generateRouter.post(
           brandIdentity = undefined;
         }
 
+        // Parse content context fields
+        const contentContext: ContentContext | undefined = req.body.language
+          ? {
+              language: (req.body.language as "nl" | "fr" | "en") || "nl",
+              weeklyContext: req.body.weeklyContext || undefined,
+              specialMessage: req.body.specialMessage || undefined,
+            }
+          : undefined;
+
+        // Parse mediaUrls (Supabase library items)
+        const mediaUrls: string[] = [];
+        if (req.body.mediaUrls) {
+          // Could be a single string or array
+          const urls = Array.isArray(req.body.mediaUrls)
+            ? req.body.mediaUrls
+            : [req.body.mediaUrls];
+          mediaUrls.push(...urls.filter((u: string) => u && u.startsWith("http")));
+        }
+
         console.log(`📦 Received ${uploadedFiles.length} file(s) via multipart upload`);
+        if (mediaUrls.length > 0) {
+          console.log(`📎 Also received ${mediaUrls.length} media URL(s) from library`);
+        }
+        if (contentContext) {
+          console.log(`🌐 Language: ${contentContext.language}, Context: ${contentContext.weeklyContext ? 'yes' : 'no'}, Message: ${contentContext.specialMessage ? 'yes' : 'no'}`);
+        }
 
         // Convert uploaded files to MediaItem[]
         const directImages: MediaItem[] = [];
@@ -981,6 +1013,62 @@ generateRouter.post(
           }
         }
 
+        // Download and process media URLs from Supabase library
+        for (let i = 0; i < mediaUrls.length; i++) {
+          const url = mediaUrls[i];
+          try {
+            console.log(`📥 Downloading library media ${i + 1}/${mediaUrls.length}: ${url.substring(0, 80)}...`);
+            const response = await fetch(url);
+            if (!response.ok) {
+              console.warn(`⚠️ Failed to download: ${url} (${response.status})`);
+              continue;
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const contentType = response.headers.get("content-type") || "image/jpeg";
+            const type = mediaTypeFromMime(contentType);
+            const fileId = `library-${i}-${uuidv4().substring(0, 8)}`;
+
+            if (type === "video") {
+              try {
+                const mp4DataUrl = convertVideoToMP4(buffer, contentType);
+                const frames = extractVideoFramesFromBuffer(buffer, contentType, 10);
+                if (frames.length > 0) {
+                  videoMetadata.set(fileId, { originalId: fileId, frameCount: frames.length });
+                  frames.forEach((frame, idx) => {
+                    videoFrameItems.push({
+                      id: `${fileId}-frame-${idx}`,
+                      base64: frame,
+                      type: "image",
+                      mimeType: "image/jpeg",
+                      videoId: fileId,
+                      frameIndex: idx,
+                      thumbnail: idx === 0 ? frames[0] : undefined,
+                    });
+                  });
+                  convertedVideos.push({
+                    id: fileId,
+                    base64: mp4DataUrl,
+                    type: "video",
+                    mimeType: "video/mp4",
+                  });
+                }
+              } catch (err: any) {
+                console.error(`❌ Failed to process library video:`, err?.message || err);
+              }
+            } else {
+              const dataUrl = bufferToDataUrl(buffer, contentType);
+              directImages.push({
+                id: fileId,
+                base64: dataUrl,
+                type: "image",
+                mimeType: contentType,
+              });
+            }
+          } catch (err: any) {
+            console.error(`❌ Failed to download library media: ${url}`, err?.message || err);
+          }
+        }
+
         // Only send images + video frames to GPT (NOT the actual MP4 videos)
         const mediaForGPT = [...directImages, ...videoFrameItems];
         
@@ -1001,7 +1089,7 @@ generateRouter.post(
           return;
         }
 
-        await handleGeneration(mediaForGPT, brandIdentity, res, videoMetadata, allMediaForFrontend);
+        await handleGeneration(mediaForGPT, brandIdentity, res, videoMetadata, allMediaForFrontend, contentContext);
         return;
       }
 
