@@ -24,16 +24,28 @@ router.post("/folder/:folderId", requireAuth, async (req: AuthRequest, res: Resp
       return;
     }
 
-    // Check for existing active share
+    // Check for existing share (active or inactive)
     const { data: existing } = await supabase
       .from("shared_folders")
       .select("*")
       .eq("folder_id", folderId)
       .eq("user_id", userId)
-      .eq("is_active", true)
+      .order("created_at", { ascending: false })
+      .limit(1)
       .single();
 
     if (existing) {
+      // Reactivate if inactive
+      if (!existing.is_active) {
+        const { data: reactivated } = await supabase
+          .from("shared_folders")
+          .update({ is_active: true })
+          .eq("id", existing.id)
+          .select()
+          .single();
+        res.json(reactivated || existing);
+        return;
+      }
       res.json(existing);
       return;
     }
@@ -61,6 +73,78 @@ router.post("/folder/:folderId", requireAuth, async (req: AuthRequest, res: Resp
   } catch (error) {
     console.error("Share folder error:", error);
     res.status(500).json({ error: "Failed to share folder" });
+  }
+});
+
+// GET /api/share/folder/:folderId — get share status for a folder (authenticated)
+router.get("/folder/:folderId", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { folderId } = req.params;
+
+    const { data: shares } = await supabase
+      .from("shared_folders")
+      .select("share_token, is_active")
+      .eq("folder_id", folderId)
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (!shares || shares.length === 0) {
+      res.status(404).json({ error: "No share found" });
+      return;
+    }
+
+    res.json(shares[0]);
+  } catch (error) {
+    console.error("Get share status error:", error);
+    res.status(500).json({ error: "Failed to get share status" });
+  }
+});
+
+// PATCH /api/share/folder/:folderId — toggle is_active on share (authenticated)
+router.patch("/folder/:folderId", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { folderId } = req.params;
+    const { is_active } = req.body;
+
+    if (typeof is_active !== "boolean") {
+      res.status(400).json({ error: "is_active must be a boolean" });
+      return;
+    }
+
+    // Find the most recent share for this folder
+    const { data: existing } = await supabase
+      .from("shared_folders")
+      .select("id")
+      .eq("folder_id", folderId)
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    if (!existing) {
+      res.status(404).json({ error: "Share not found" });
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("shared_folders")
+      .update({ is_active })
+      .eq("id", existing.id)
+      .select("share_token, is_active")
+      .single();
+
+    if (error || !data) {
+      res.status(500).json({ error: "Failed to update share" });
+      return;
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error("Toggle share error:", error);
+    res.status(500).json({ error: "Failed to update share" });
   }
 });
 
