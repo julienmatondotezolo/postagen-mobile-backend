@@ -68,6 +68,7 @@ router.post(
             mime_type: file.mimetype,
             folder: folderId ? "custom" : "unsorted",
             ...(folderId ? { folder_id: folderId } : {}),
+            status: "pending",
           })
           .select()
           .single();
@@ -146,11 +147,11 @@ router.post(
   }
 );
 
-// GET /api/media — list media with optional folder filter
+// GET /api/media — list media with optional folder + status filter
 router.get("/", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const { folder, folderId, limit = "50", offset = "0" } = req.query;
+    const { folder, folderId, status, limit = "50", offset = "0" } = req.query;
 
     let query = supabase
       .from("media")
@@ -163,6 +164,10 @@ router.get("/", requireAuth, async (req: AuthRequest, res: Response) => {
       query = query.eq("folder_id", folderId);
     } else if (folder && folder !== "all") {
       query = query.eq("folder", folder);
+    }
+
+    if (status && typeof status === "string" && ["pending", "liked", "unliked"].includes(status)) {
+      query = query.eq("status", status);
     }
 
     const { data, error } = await query;
@@ -179,14 +184,14 @@ router.get("/", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// GET /api/media/stats — media counts by folder
+// GET /api/media/stats — media counts by folder with per-folder status breakdown
 router.get("/stats", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
 
     const { data, error } = await supabase
       .from("media")
-      .select("folder, folder_id")
+      .select("folder, folder_id, status")
       .eq("user_id", userId);
 
     if (error) {
@@ -194,19 +199,30 @@ router.get("/stats", requireAuth, async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const customFolderCounts: Record<string, number> = {};
+    // Per-folder stats: { folderId: { total, pending, liked, unliked } }
+    const folderStats: Record<string, { total: number; pending: number; liked: number; unliked: number }> = {};
+
+    // "unsorted" bucket for media without a custom folder
+    const unsortedStats = { total: 0, pending: 0, liked: 0, unliked: 0 };
+
     for (const m of data) {
+      const s = m.status || "pending";
       if (m.folder_id) {
-        customFolderCounts[m.folder_id] = (customFolderCounts[m.folder_id] || 0) + 1;
+        if (!folderStats[m.folder_id]) {
+          folderStats[m.folder_id] = { total: 0, pending: 0, liked: 0, unliked: 0 };
+        }
+        folderStats[m.folder_id].total++;
+        folderStats[m.folder_id][s as "pending" | "liked" | "unliked"]++;
+      } else {
+        unsortedStats.total++;
+        unsortedStats[s as "pending" | "liked" | "unliked"]++;
       }
     }
 
     const stats = {
       total: data.length,
-      unsorted: data.filter((m) => m.folder === "unsorted").length,
-      liked: data.filter((m) => m.folder === "liked").length,
-      unliked: data.filter((m) => m.folder === "unliked").length,
-      customFolders: customFolderCounts,
+      unsorted: unsortedStats,
+      folders: folderStats,
     };
 
     res.json(stats);
@@ -216,7 +232,7 @@ router.get("/stats", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PATCH /api/media/:id/folder — update media folder
+// PATCH /api/media/:id/folder — move media to a different folder
 router.patch(
   "/:id/folder",
   requireAuth,
@@ -224,21 +240,17 @@ router.patch(
     try {
       const userId = req.user!.id;
       const { id } = req.params;
-      const { folder, folderId } = req.body;
+      const { folderId } = req.body;
 
       const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
       if (folderId) {
-        // Move to custom folder
         updateData.folder = "custom";
         updateData.folder_id = folderId;
-      } else if (folder && ["liked", "unliked", "unsorted"].includes(folder)) {
-        // Move to system folder
-        updateData.folder = folder;
-        updateData.folder_id = null;
       } else {
-        res.status(400).json({ error: "Invalid folder" });
-        return;
+        // Move to unsorted
+        updateData.folder = "unsorted";
+        updateData.folder_id = null;
       }
 
       const { data, error } = await supabase
@@ -261,6 +273,66 @@ router.patch(
     }
   }
 );
+
+// PATCH /api/media/:id/status — update media status (liked/unliked/pending)
+router.patch(
+  "/:id/status",
+  requireAuth,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const userId = req.user!.id;
+      const { id } = req.params;
+      const { status } = req.body;
+
+      if (!status || !["pending", "liked", "unliked"].includes(status)) {
+        res.status(400).json({ error: "Invalid status" });
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("media")
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq("id", id)
+        .eq("user_id", userId)
+        .select()
+        .single();
+
+      if (error) {
+        res.status(404).json({ error: "Media not found" });
+        return;
+      }
+
+      res.json(data);
+    } catch (error) {
+      console.error("Media status update error:", error);
+      res.status(500).json({ error: "Failed to update status" });
+    }
+  }
+);
+
+// GET /api/media/storage — get storage usage for the user
+router.get("/storage", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+
+    const { data, error } = await supabase
+      .from("media")
+      .select("size")
+      .eq("user_id", userId);
+
+    if (error) {
+      res.status(500).json({ error: "Failed to fetch storage usage" });
+      return;
+    }
+
+    const usedBytes = data.reduce((sum, row) => sum + (row.size || 0), 0);
+
+    res.json({ usedBytes, maxBytes: 1073741824 }); // 1 GB
+  } catch (error) {
+    console.error("Storage usage error:", error);
+    res.status(500).json({ error: "Failed to fetch storage usage" });
+  }
+});
 
 // DELETE /api/media/:id — delete from Storage + DB
 router.delete(

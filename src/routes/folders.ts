@@ -72,6 +72,7 @@ router.post("/", requireAuth, async (req: AuthRequest, res: Response) => {
       .single();
 
     if (error) {
+      console.error("Folder create DB error:", error);
       if (error.code === "23505") {
         res.status(409).json({ error: "A folder with this name already exists" });
         return;
@@ -122,18 +123,42 @@ router.patch("/:id", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /api/folders/:id — delete folder, move media to unsorted
+// DELETE /api/folders/:id — delete folder, optionally delete media too
 router.delete("/:id", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
     const { id } = req.params;
+    const withMedia = req.query.withMedia === "true";
 
-    // Move media in this folder back to unsorted
-    await supabase
-      .from("media")
-      .update({ folder: "unsorted", folder_id: null, updated_at: new Date().toISOString() })
-      .eq("folder_id", id)
-      .eq("user_id", userId);
+    if (withMedia) {
+      // Fetch media rows to get storage paths
+      const { data: mediaItems } = await supabase
+        .from("media")
+        .select("id, storage_path")
+        .eq("folder_id", id)
+        .eq("user_id", userId);
+
+      if (mediaItems && mediaItems.length > 0) {
+        // Delete files from Supabase Storage
+        const paths = mediaItems.map((m) => m.storage_path);
+        await supabase.storage.from("media").remove(paths);
+
+        // Delete media rows from DB
+        const mediaIds = mediaItems.map((m) => m.id);
+        await supabase
+          .from("media")
+          .delete()
+          .in("id", mediaIds)
+          .eq("user_id", userId);
+      }
+    } else {
+      // Move media in this folder back to unsorted
+      await supabase
+        .from("media")
+        .update({ folder: "unsorted", folder_id: null, updated_at: new Date().toISOString() })
+        .eq("folder_id", id)
+        .eq("user_id", userId);
+    }
 
     // Delete the folder
     const { error } = await supabase
