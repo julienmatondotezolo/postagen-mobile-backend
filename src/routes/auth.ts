@@ -86,7 +86,7 @@ router.post("/register", async (req, res) => {
     });
 
     setSessionCookie(res, sessionToken);
-    res.status(201).json({ user });
+    res.status(201).json({ user, token: sessionToken });
   } catch (err) {
     console.error("Register error:", err);
     res.status(500).json({ error: "Er is een fout opgetreden" });
@@ -135,7 +135,7 @@ router.post("/login", async (req, res) => {
     setSessionCookie(res, sessionToken);
 
     const { password_hash: _, ...safeUser } = user;
-    res.json({ user: safeUser });
+    res.json({ user: safeUser, token: sessionToken });
   } catch (err) {
     console.error("Login error:", err);
     res.status(500).json({ error: "Er is een fout opgetreden" });
@@ -144,7 +144,7 @@ router.post("/login", async (req, res) => {
 
 // POST /api/auth/logout
 router.post("/logout", async (req, res) => {
-  const token = req.cookies?.postagen_session;
+  const token = req.headers.authorization?.replace("Bearer ", "") || req.cookies?.postagen_session;
 
   if (token) {
     await supabase.from("sessions").delete().eq("token", token);
