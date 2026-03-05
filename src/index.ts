@@ -1,8 +1,16 @@
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 import { generateRouter } from "./routes/generate";
 import { brandRouter } from "./routes/brand";
+import { authRouter } from "./routes/auth";
+import { brandIdentityRouter } from "./routes/brand-identity";
+import { mediaRouter } from "./routes/media";
+import { foldersRouter } from "./routes/folders";
+import { plansRouter } from "./routes/plans";
+import { postsRouter } from "./routes/posts";
+import { shareRouter } from "./routes/share";
 
 dotenv.config();
 
@@ -29,19 +37,28 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 // Middleware
 app.use(
   cors({
-    origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:3001"],
-    methods: ["GET", "POST", "OPTIONS"],
+    origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:3001", "http://localhost:1010"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
   })
 );
+app.use(cookieParser());
 
 // Increase payload limit for base64 images/videos (500MB to be safe)
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ extended: true, limit: "500mb" }));
 
 // Routes
+app.use("/api/auth", authRouter);
+app.use("/api/brand-identity", brandIdentityRouter);
 app.use("/api/generate", generateRouter);
 app.use("/api/brand", brandRouter);
+app.use("/api/media", mediaRouter);
+app.use("/api/folders", foldersRouter);
+app.use("/api/plans", plansRouter);
+app.use("/api/posts", postsRouter);
+app.use("/api/share", shareRouter);
 
 // Health check
 app.get("/health", (_req, res) => {
