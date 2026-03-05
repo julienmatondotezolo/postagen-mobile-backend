@@ -156,6 +156,65 @@ router.post("/", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
+// POST /api/plans/:id/posts — add posts to existing plan
+router.post("/:id/posts", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { id } = req.params;
+    const { posts } = req.body;
+
+    // Validate plan ownership
+    const { data: plan, error: planError } = await supabase
+      .from("plans")
+      .select("id")
+      .eq("id", id)
+      .eq("user_id", userId)
+      .single();
+
+    if (planError || !plan) {
+      res.status(404).json({ error: "Plan not found" });
+      return;
+    }
+
+    if (!Array.isArray(posts) || posts.length === 0) {
+      res.status(400).json({ error: "Posts array is required" });
+      return;
+    }
+
+    const postRows = posts.map((p: Record<string, unknown>) => ({
+      user_id: userId,
+      plan_id: id,
+      media_id: p.media_id || null,
+      caption: p.caption || "",
+      hashtags: p.hashtags || [],
+      post_type: p.post_type || "feed",
+      platform_tip: p.platform_tip || "",
+      scheduled_date: p.scheduled_date || null,
+      scheduled_time: p.scheduled_time || null,
+      day_name: p.day_name || null,
+      sentiment: p.sentiment || "Neutral",
+      is_optimized: p.is_optimized || false,
+      thumbnail: p.thumbnail || null,
+    }));
+
+    const { data: postData, error: postsError } = await supabase
+      .from("posts")
+      .insert(postRows)
+      .select();
+
+    if (postsError) {
+      console.error("Posts create error:", postsError);
+      res.status(500).json({ error: "Failed to add posts" });
+      return;
+    }
+
+    res.status(201).json({ posts: postData });
+  } catch (error) {
+    console.error("Add posts error:", error);
+    res.status(500).json({ error: "Failed to add posts" });
+  }
+});
+
 // PATCH /api/plans/:id — update plan
 router.patch("/:id", requireAuth, async (req: AuthRequest, res: Response) => {
   try {

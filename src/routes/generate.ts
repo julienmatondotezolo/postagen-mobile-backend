@@ -449,7 +449,8 @@ async function handleGeneration(
   res: Response,
   videoMetadata?: Map<string, { originalId: string; frameCount: number }>,
   allMediaForFrontend?: MediaItem[],
-  contentContext?: ContentContext
+  contentContext?: ContentContext,
+  libraryIdMap?: Map<string, string>
 ): Promise<void> {
   // Check OpenAI key
   if (!process.env.OPENAI_API_KEY) {
@@ -650,6 +651,7 @@ async function handleGeneration(
     return {
       id: `post-${uuidv4()}`,
       mediaId: mediaItem.id,
+      realMediaId: libraryIdMap?.get(mediaItem.id) || null,
       postType: "feed" as const,
       caption: `Ontdek wat ${label} te bieden heeft. Bekijk onze nieuwste content en laat je inspireren! ✨`,
       hashtags: ["#ContentPlan", "#SocialMedia", "#AIGenerated"],
@@ -769,6 +771,7 @@ async function handleGeneration(
     return {
       id: `post-${uuidv4()}`,
       mediaId: actualMediaId, // Uses original video/image ID (not frame ID)
+      realMediaId: libraryIdMap?.get(actualMediaId) || null, // Real Supabase UUID for library items
       postType: gptPost.postType || "feed",
       caption,
       hashtags:
@@ -895,6 +898,18 @@ generateRouter.post(
             : [req.body.mediaUrls];
           mediaUrls.push(...urls.filter((u: string) => u && u.startsWith("http")));
         }
+
+        // Parse mediaIds (real Supabase UUIDs parallel to mediaUrls)
+        const mediaIds: string[] = [];
+        if (req.body.mediaIds) {
+          const ids = Array.isArray(req.body.mediaIds)
+            ? req.body.mediaIds
+            : [req.body.mediaIds];
+          mediaIds.push(...ids.filter((id: string) => id));
+        }
+
+        // Build mapping: library-X-xxx → real Supabase UUID
+        const libraryIdMap = new Map<string, string>();
 
         const fileCount = uploadedFiles?.length ?? 0;
         if (fileCount === 0 && mediaUrls.length === 0) {
@@ -1029,6 +1044,11 @@ generateRouter.post(
             const type = mediaTypeFromMime(contentType);
             const fileId = `library-${i}-${uuidv4().substring(0, 8)}`;
 
+            // Track mapping from generated fileId to real Supabase UUID
+            if (i < mediaIds.length && mediaIds[i]) {
+              libraryIdMap.set(fileId, mediaIds[i]);
+            }
+
             if (type === "video") {
               try {
                 const mp4DataUrl = convertVideoToMP4(buffer, contentType);
@@ -1090,7 +1110,7 @@ generateRouter.post(
           return;
         }
 
-        await handleGeneration(mediaForGPT, brandIdentity, res, videoMetadata, allMediaForFrontend, contentContext);
+        await handleGeneration(mediaForGPT, brandIdentity, res, videoMetadata, allMediaForFrontend, contentContext, libraryIdMap);
         return;
       }
 
