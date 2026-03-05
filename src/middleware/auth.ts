@@ -12,8 +12,10 @@ export interface AuthRequest extends Request {
 
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const token = req.cookies?.postagen_session;
+  const route = `${req.method} ${req.originalUrl}`;
 
   if (!token) {
+    console.warn(`🔒 AUTH FAIL [no token] ${route} — cookies: ${JSON.stringify(Object.keys(req.cookies || {}))}`);
     res.status(401).json({ error: "Niet ingelogd" });
     return;
   }
@@ -25,12 +27,14 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     .single();
 
   if (error || !session) {
+    console.warn(`🔒 AUTH FAIL [invalid session] ${route} — token: ${token.slice(0, 8)}...`);
     res.clearCookie("postagen_session");
     res.status(401).json({ error: "Ongeldige sessie" });
     return;
   }
 
   if (new Date(session.expires_at) < new Date()) {
+    console.warn(`🔒 AUTH FAIL [expired] ${route} — user_id: ${session.user_id}, expired: ${session.expires_at}`);
     await supabase.from("sessions").delete().eq("token", token);
     res.clearCookie("postagen_session");
     res.status(401).json({ error: "Sessie verlopen" });
@@ -44,6 +48,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
     .single();
 
   if (userError || !user) {
+    console.warn(`🔒 AUTH FAIL [user not found] ${route} — user_id: ${session.user_id}`);
     res.status(401).json({ error: "Gebruiker niet gevonden" });
     return;
   }

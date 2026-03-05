@@ -34,6 +34,23 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
+// Request/response logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  const { method, originalUrl } = req;
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    const user = (req as any).user;
+    const userTag = user ? `[${user.email}]` : "[anon]";
+    const status = res.statusCode;
+    const level = status >= 500 ? "❌" : status >= 400 ? "⚠️" : "✅";
+    console.log(`${level} ${method} ${originalUrl} → ${status} (${duration}ms) ${userTag}`);
+  });
+
+  next();
+});
+
 // Middleware
 app.use(
   cors({

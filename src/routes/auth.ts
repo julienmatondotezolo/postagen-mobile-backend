@@ -13,7 +13,7 @@ function setSessionCookie(res: Response, token: string) {
   res.cookie("postagen_session", token, {
     httpOnly: true,
     secure: IS_PRODUCTION,
-    sameSite: "lax",
+    sameSite: IS_PRODUCTION ? "none" : "lax",
     maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     path: "/",
   });
