@@ -954,7 +954,7 @@ generateRouter.post(
         const videoMetadata: Map<string, { originalId: string; frameCount: number }> = new Map();
 
         for (let i = 0; i < (uploadedFiles?.length ?? 0); i++) {
-          const file = uploadedFiles[i];
+          const file = uploadedFiles![i];
           
           // Extract media ID from filename (format: "media-123456789.jpg")
           // The frontend sends filename as: `${mediaId}${extension}`
