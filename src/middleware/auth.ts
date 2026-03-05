@@ -11,7 +11,7 @@ export interface AuthRequest extends Request {
 }
 
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
-  const token = req.cookies?.postagen_session;
+  const token = req.headers.authorization?.replace("Bearer ", "") || req.cookies?.postagen_session;
   const route = `${req.method} ${req.originalUrl}`;
 
   if (!token) {
