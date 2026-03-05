@@ -10,6 +10,7 @@ import { mediaRouter } from "./routes/media";
 import { foldersRouter } from "./routes/folders";
 import { plansRouter } from "./routes/plans";
 import { postsRouter } from "./routes/posts";
+import { shareRouter } from "./routes/share";
 
 dotenv.config();
 
@@ -57,6 +58,7 @@ app.use("/api/media", mediaRouter);
 app.use("/api/folders", foldersRouter);
 app.use("/api/plans", plansRouter);
 app.use("/api/posts", postsRouter);
+app.use("/api/share", shareRouter);
 
 // Health check
 app.get("/health", (_req, res) => {
