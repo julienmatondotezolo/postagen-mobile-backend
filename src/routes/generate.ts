@@ -886,10 +886,21 @@ generateRouter.post(
         // .any() puts all files in req.files regardless of field name
         const uploadedFiles = req.files as Express.Multer.File[] | undefined;
 
-        if (!uploadedFiles || uploadedFiles.length === 0) {
+        // Parse mediaUrls (Supabase library items) early — needed for validation
+        const mediaUrls: string[] = [];
+        if (req.body.mediaUrls) {
+          // Could be a single string or array
+          const urls = Array.isArray(req.body.mediaUrls)
+            ? req.body.mediaUrls
+            : [req.body.mediaUrls];
+          mediaUrls.push(...urls.filter((u: string) => u && u.startsWith("http")));
+        }
+
+        const fileCount = uploadedFiles?.length ?? 0;
+        if (fileCount === 0 && mediaUrls.length === 0) {
           res.status(400).json({
             error: "No media provided",
-            message: "At least one file is required to generate posts.",
+            message: "At least one file or media URL is required to generate posts.",
           });
           return;
         }
@@ -913,17 +924,7 @@ generateRouter.post(
             }
           : undefined;
 
-        // Parse mediaUrls (Supabase library items)
-        const mediaUrls: string[] = [];
-        if (req.body.mediaUrls) {
-          // Could be a single string or array
-          const urls = Array.isArray(req.body.mediaUrls)
-            ? req.body.mediaUrls
-            : [req.body.mediaUrls];
-          mediaUrls.push(...urls.filter((u: string) => u && u.startsWith("http")));
-        }
-
-        console.log(`📦 Received ${uploadedFiles.length} file(s) via multipart upload`);
+        console.log(`📦 Received ${fileCount} file(s) via multipart upload`);
         if (mediaUrls.length > 0) {
           console.log(`📎 Also received ${mediaUrls.length} media URL(s) from library`);
         }
@@ -937,7 +938,7 @@ generateRouter.post(
         const convertedVideos: MediaItem[] = []; // MP4 videos for frontend (not sent to GPT)
         const videoMetadata: Map<string, { originalId: string; frameCount: number }> = new Map();
 
-        for (let i = 0; i < uploadedFiles.length; i++) {
+        for (let i = 0; i < (uploadedFiles?.length ?? 0); i++) {
           const file = uploadedFiles[i];
           
           // Extract media ID from filename (format: "media-123456789.jpg")
