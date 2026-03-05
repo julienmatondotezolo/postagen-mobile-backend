@@ -6,6 +6,10 @@ import { generateRouter } from "./routes/generate";
 import { brandRouter } from "./routes/brand";
 import { authRouter } from "./routes/auth";
 import { brandIdentityRouter } from "./routes/brand-identity";
+import { mediaRouter } from "./routes/media";
+import { foldersRouter } from "./routes/folders";
+import { plansRouter } from "./routes/plans";
+import { postsRouter } from "./routes/posts";
 
 dotenv.config();
 
@@ -33,7 +37,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 app.use(
   cors({
     origin: [FRONTEND_URL, "http://localhost:3000", "http://localhost:3001", "http://localhost:1010"],
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   })
@@ -49,6 +53,10 @@ app.use("/api/auth", authRouter);
 app.use("/api/brand-identity", brandIdentityRouter);
 app.use("/api/generate", generateRouter);
 app.use("/api/brand", brandRouter);
+app.use("/api/media", mediaRouter);
+app.use("/api/folders", foldersRouter);
+app.use("/api/plans", plansRouter);
+app.use("/api/posts", postsRouter);
 
 // Health check
 app.get("/health", (_req, res) => {

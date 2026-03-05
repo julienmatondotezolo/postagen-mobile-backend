@@ -228,4 +228,57 @@ router.post("/resend-verification", requireAuth as any, async (req: AuthRequest,
   }
 });
 
+// POST /api/auth/change-password
+router.post("/change-password", requireAuth as any, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      res.status(400).json({ error: "Current and new password are required" });
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: "New password must be at least 8 characters" });
+      return;
+    }
+
+    // Fetch password hash
+    const { data: userData, error: fetchError } = await supabase
+      .from("users")
+      .select("password_hash")
+      .eq("id", user.id)
+      .single();
+
+    if (fetchError || !userData) {
+      res.status(500).json({ error: "Could not verify user" });
+      return;
+    }
+
+    const validPassword = await bcrypt.compare(currentPassword, userData.password_hash);
+    if (!validPassword) {
+      res.status(401).json({ error: "Current password is incorrect" });
+      return;
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({ password_hash: newHash, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+
+    if (updateError) {
+      res.status(500).json({ error: "Could not update password" });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Change password error:", err);
+    res.status(500).json({ error: "An error occurred" });
+  }
+});
+
 export { router as authRouter };
